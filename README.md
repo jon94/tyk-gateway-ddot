@@ -1,44 +1,57 @@
 # Tyk Gateway + Datadog DDOT Collector on GKE
 
-End-to-end OTel tracing from Tyk Gateway OSS through the Datadog Distribution of OpenTelemetry (DDOT) Collector into Datadog APM, running on a GKE Standard cluster.
-
----
+End-to-end OTel tracing from Tyk Gateway OSS through the Datadog Distribution of OpenTelemetry (DDOT) Collector into Datadog APM, running on GKE Standard.
 
 ## Architecture
 
 ```
-Tyk Gateway (tyk namespace)
-    │  OTLP gRPC
-    ▼
-datadog-otel ClusterIP Service (port 4317)
-    │
-    ▼
-DDOT Collector (otel-agent container in Datadog Agent DaemonSet)
-    │  otel-config.yaml pipeline
-    ▼
-Datadog APM (service: tyk)
+Tyk Gateway  ──OTLP gRPC──▶  datadog-otel (ClusterIP :4317)
+                                       │
+                               DDOT Collector
+                            (otel-agent container
+                             in Datadog DaemonSet)
+                                       │
+                              otel-config.yaml pipeline
+                           k8sattributes → resourcedetection
+                            → infraattributes → batch
+                                       │
+                              Datadog APM (service: tyk)
+```
+
+## Repository Structure
+
+```
+.
+├── otel-config.yaml   # DDOT Collector pipeline config
+├── ddot-values.yaml   # Datadog Agent Helm values
+├── tyk-values.yaml    # Tyk Gateway Helm values
+└── README.md
 ```
 
 ---
 
 ## Prerequisites
 
-- GKE Standard cluster (non-autopilot) — Ubuntu node image required (COS blocks eBPF writes to `/usr/src`)
-- `kubectl` and `helm` configured
-- Datadog API key
+- GCP project with GKE API enabled
+- `gcloud` CLI authenticated (`gcloud auth login`)
+- `kubectl` and `helm` installed
+- Datadog account — API key ready
 
 ---
 
-## 1. Create GKE Cluster
+## Step 1 — Create GKE Cluster
+
+> **Important:** Use `UBUNTU_CONTAINERD` node image. The default COS image has a read-only `/usr/src` that blocks Datadog system-probe startup.
 
 ```bash
+# Create cluster
 gcloud container clusters create tyk-otel-demo \
   --zone=asia-east2-a \
   --machine-type=e2-standard-2 \
   --num-nodes=2 \
   --cluster-version=latest
 
-# Create Ubuntu node pool (required — COS image blocks Datadog system-probe)
+# Add Ubuntu node pool
 gcloud container node-pools create ubuntu-pool \
   --cluster=tyk-otel-demo \
   --zone=asia-east2-a \
@@ -46,27 +59,19 @@ gcloud container node-pools create ubuntu-pool \
   --num-nodes=2 \
   --image-type=UBUNTU_CONTAINERD
 
-# Delete the default COS pool
+# Remove default COS pool
 gcloud container node-pools delete default-pool \
   --cluster=tyk-otel-demo \
   --zone=asia-east2-a \
   --quiet
 
+# Get credentials
 gcloud container clusters get-credentials tyk-otel-demo --zone=asia-east2-a
 ```
 
 ---
 
-## 2. Create Namespaces
-
-```bash
-kubectl create namespace tyk
-kubectl create namespace datadog
-```
-
----
-
-## 3. Add Helm Repos
+## Step 2 — Add Helm Repositories
 
 ```bash
 helm repo add tyk-helm https://helm.tyk.io/public/helm/charts/
@@ -77,24 +82,38 @@ helm repo update
 
 ---
 
-## 4. Deploy Datadog Agent with DDOT Collector
-
-The DDOT Collector runs as a sidecar container (`otel-agent`) inside the Datadog Agent DaemonSet. The pipeline is defined in `otel-config.yaml` and mounted via a ConfigMap.
+## Step 3 — Create Namespaces
 
 ```bash
-# Fill in your API key in ddot-values.yaml first, then:
-
-kubectl create configmap ddot-otel-config \
-  --from-file=otel-config.yaml=otel-config.yaml \
-  -n datadog
-
-helm install datadog-agent datadog/datadog \
-  --namespace datadog \
-  -f ddot-values.yaml
+kubectl create namespace tyk
+kubectl create namespace datadog
 ```
 
-### Expose DDOT OTLP receiver as a ClusterIP Service
+---
 
+## Step 4 — Deploy Datadog Agent with DDOT Collector
+
+**4a.** Fill in your Datadog API key in `ddot-values.yaml`:
+```yaml
+datadog:
+  apiKey: <YOUR_DATADOG_API_KEY>
+```
+
+**4b.** Create the DDOT config ConfigMap:
+```bash
+kubectl create configmap ddot-otel-config \
+  --from-file=otel-config.yaml=otel-config.yaml \
+  --namespace datadog
+```
+
+**4c.** Install the Datadog Agent:
+```bash
+helm install datadog-agent datadog/datadog \
+  --namespace datadog \
+  --values ddot-values.yaml
+```
+
+**4d.** Expose the DDOT OTLP receiver as a ClusterIP Service:
 ```bash
 kubectl apply -f - <<EOF
 apiVersion: v1
@@ -119,29 +138,49 @@ EOF
 
 ---
 
-## 5. Deploy Redis + Tyk Gateway
+## Step 5 — Deploy Redis and Tyk Gateway
 
 ```bash
+# Redis (required by Tyk)
 helm install redis bitnami/redis \
   --namespace tyk \
   --set auth.enabled=false \
   --set architecture=standalone
 
+# Tyk Gateway
 helm install tyk-gateway tyk-helm/tyk-oss \
   --namespace tyk \
-  -f tyk-values.yaml
+  --values tyk-values.yaml
 ```
 
 ---
 
-## 6. Verify Spans are Flowing
+## Step 6 — Verify Everything is Running
 
 ```bash
-# Port-forward Tyk
+kubectl get pods -n datadog
+kubectl get pods -n tyk
+```
+
+Expected output:
+```
+NAMESPACE   NAME                                      READY   STATUS
+datadog     datadog-agent-xxxxx                       4/4     Running
+datadog     datadog-agent-cluster-agent-xxxxx         1/1     Running
+tyk         gateway-tyk-gateway-xxxxx                 1/1     Running
+tyk         redis-master-0                            1/1     Running
+```
+
+---
+
+## Step 7 — Create a Test API and Send Traffic
+
+```bash
+# Port-forward Tyk Gateway
 kubectl port-forward -n tyk svc/gateway-svc-tyk-gateway 8080:8080
 
-# Create a test API
-curl -s -X POST http://localhost:8080/tyk/apis \
+# Create a test API (proxies to httpbin.org)
+curl -X POST http://localhost:8080/tyk/apis \
   -H "x-tyk-authorization: CHANGEME" \
   -H "Content-Type: application/json" \
   -d '{
@@ -161,34 +200,51 @@ curl -s -X POST http://localhost:8080/tyk/apis \
     "active": true
   }'
 
-curl -s http://localhost:8080/tyk/reload -H "x-tyk-authorization: CHANGEME"
+# Reload Tyk to activate the API
+curl http://localhost:8080/tyk/reload -H "x-tyk-authorization: CHANGEME"
 
-# Send traffic
-for i in $(seq 1 10); do curl -s -o /dev/null -w "req $i: %{http_code}\n" http://localhost:8080/httpbin/get; done
+# Send test traffic
+for i in $(seq 1 20); do
+  curl -s -o /dev/null http://localhost:8080/httpbin/get
+  curl -s -o /dev/null http://localhost:8080/httpbin/status/404
+  curl -s -o /dev/null http://localhost:8080/httpbin/status/500
+done
+```
 
-# Check DDOT received and exported spans
-DDPOD=$(kubectl get pods -n datadog -l app=datadog-agent -o jsonpath='{.items[0].metadata.name}')
+---
+
+## Step 8 — Confirm Spans are Reaching Datadog
+
+```bash
+# Find the Datadog Agent pod on the same node as Tyk
+TYKNODE=$(kubectl get pod -n tyk -l app=gateway-tyk-gateway -o jsonpath='{.items[0].spec.nodeName}')
+DDPOD=$(kubectl get pods -n datadog -l app=datadog-agent -o wide --no-headers | grep "$TYKNODE" | awk '{print $1}')
+
+# Port-forward DDOT metrics endpoint
 kubectl port-forward -n datadog pod/$DDPOD 8888:8888 &
+
+# Check span counters
 curl -s http://localhost:8888/metrics | grep -E "accepted_spans|sent_spans|refused_spans" | grep -v "^#"
 ```
 
 Expected output:
 ```
-otelcol_exporter_sent_spans{...exporter="datadog"...}       <N>
-otelcol_receiver_accepted_spans{...receiver="otlp"...}      <N>
-otelcol_receiver_refused_spans{...receiver="otlp"...}       0
+otelcol_exporter_sent_spans{exporter="datadog",...}          <N>
+otelcol_receiver_accepted_spans{receiver="otlp",...}         <N>
+otelcol_receiver_refused_spans{receiver="otlp",...}          0
 ```
 
 View traces in Datadog: **APM → Traces → filter `service:tyk`**
 
 ---
 
-## Gotchas
+## Troubleshooting
 
-| Issue | Cause | Fix |
+| Symptom | Cause | Fix |
 |---|---|---|
-| Datadog Agent pods `CreateContainerError` | COS node image blocks `/usr/src` writes (eBPF) | Use `--image-type=UBUNTU_CONTAINERD` node pool |
-| Tyk OTel endpoint `$(HOST_IP)` resolves literally | Kubernetes env var substitution order — `HOST_IP` injected after the OTel env var | Use a ClusterIP Service DNS name instead of `hostIP` |
-| Tyk initialized but no spans exported | gRPC connection gone idle between init and first request | Set `connectionTimeout: 10` and `spanProcessorType: simple` |
-| API definitions lost on pod restart | Tyk OSS stores APIs ephemerally | Mount API definitions as a ConfigMap under `/mnt/tyk-gateway/apps/` or use Tyk Operator |
-| Tyk API 404 after reload | Pod restarted and lost in-memory API | Re-POST to `/tyk/apis` and call `/tyk/reload` |
+| Agent pods `CreateContainerError` | COS node image blocks `/usr/src` writes | Use `--image-type=UBUNTU_CONTAINERD` node pool |
+| No spans in DDOT metrics | `k8sattributes` RBAC missing pod list permissions | RBAC rules are included in `ddot-values.yaml` — re-run `helm upgrade` |
+| Tyk logs `lookup $(HOST_IP): no such host` | `$(HOST_IP)` env var not substituted | Use ClusterIP Service DNS name (`datadog-otel.datadog.svc.cluster.local:4317`) instead of `hostIP` |
+| Tyk initialized but no spans exported | gRPC connection gone idle | `spanProcessorType: simple` and `connectionTimeout: 10` are set in `tyk-values.yaml` |
+| API returns 404 after pod restart | Tyk OSS stores API definitions ephemerally | Re-POST to `/tyk/apis` and call `/tyk/reload` after every restart |
+| SSH to VM timing out | Firewall rule missing or wrong source IP | Use `--tunnel-through-iap` with `gcloud compute ssh` |
