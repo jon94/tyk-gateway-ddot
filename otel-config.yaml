@@ -43,11 +43,6 @@ processors:
 
 exporters:
   datadog:
-    # first_resource uses k8s.node.name (added by k8sattributes) as the
-    # Datadog hostname, enabling host tag correlation from the Agent on
-    # that node — without touching Tyk pod resource attributes.
-    host_metadata:
-      hostname_source: first_resource
     api:
       site: ${env:DD_SITE}
       key: ${env:DD_API_KEY}
