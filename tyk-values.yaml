@@ -17,14 +17,20 @@ tyk-gateway:
       contextPropagation: tracecontext
 
     extraEnvs:
-      # Inject pod UID and container name so infraattributes processor
-      # can correlate spans to Kubernetes infrastructure tags in Datadog
+      # Downward API — expose pod and node identity to the OTel SDK
       - name: OTEL_K8S_POD_UID
         valueFrom:
           fieldRef:
             fieldPath: metadata.uid
+      - name: OTEL_K8S_NODE_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: spec.nodeName
+      # k8s.node.name is used by the Datadog exporter as the hostname,
+      # enabling host tag correlation from the Datadog Agent on that node.
+      # k8s.pod.uid + k8s.container.name satisfy the infraattributes processor.
       - name: OTEL_RESOURCE_ATTRIBUTES
-        value: "k8s.pod.uid=$(OTEL_K8S_POD_UID),k8s.container.name=gateway-tyk-gateway"
+        value: "k8s.pod.uid=$(OTEL_K8S_POD_UID),k8s.container.name=gateway-tyk-gateway,k8s.node.name=$(OTEL_K8S_NODE_NAME)"
 
     service:
       type: LoadBalancer
