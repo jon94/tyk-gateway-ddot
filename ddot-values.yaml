@@ -30,6 +30,18 @@ datadog:
     configMap:
       name: ddot-otel-config
       key: otel-config.yaml
+    # RBAC rules required by k8sattributes processor to list pods/replicasets.
+    # Without these, k8sattributes cannot enrich spans with Kubernetes metadata
+    # and span processing is blocked entirely.
+    rbac:
+      create: true
+      rules:
+        - apiGroups: [""]
+          resources: ["pods", "namespaces", "nodes", "replicationcontrollers", "services", "endpoints"]
+          verbs: ["get", "list", "watch"]
+        - apiGroups: ["apps"]
+          resources: ["replicasets", "deployments", "daemonsets", "statefulsets"]
+          verbs: ["get", "list", "watch"]
 
 agents:
   containers:
