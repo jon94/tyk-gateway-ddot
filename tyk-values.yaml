@@ -1,0 +1,24 @@
+global:
+  redis:
+    addrs:
+      - redis-master.tyk.svc.cluster.local:6379
+    pass: ""
+
+tyk-gateway:
+  gateway:
+    replicaCount: 1
+    opentelemetry:
+      enabled: true
+      exporter: grpc
+      endpoint: datadog-otel.datadog.svc.cluster.local:4317
+      connectionTimeout: 10
+      spanProcessorType: simple
+      samplingType: AlwaysOn
+      contextPropagation: tracecontext
+
+    extraEnvs: []
+
+    service:
+      type: LoadBalancer
+      port: 8080
+      targetPort: 8080

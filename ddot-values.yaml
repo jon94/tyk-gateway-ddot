@@ -1,0 +1,63 @@
+datadog:
+  apiKey: <YOUR_DATADOG_API_KEY>
+  site: datadoghq.com
+  clusterName: tyk-otel-demo
+  tags:
+    - "env:demo"
+  apm:
+    portEnabled: true
+    peer_service_aggregation: true
+  orchestratorExplorer:
+    enabled: true
+  processAgent:
+    enabled: true
+    processCollection: true
+  podLabelsAsTags:
+    app: app
+
+  otelCollector:
+    enabled: true
+    ports:
+      - containerPort: 4317
+        hostPort: 4317
+        name: otel-grpc
+        protocol: TCP
+      - containerPort: 4318
+        hostPort: 4318
+        name: otel-http
+        protocol: TCP
+    # Reference the standalone otel-config.yaml ConfigMap
+    configMap:
+      name: ddot-otel-config
+      key: otel-config.yaml
+
+agents:
+  containers:
+    agent:
+      resources:
+        requests:
+          cpu: 200m
+          memory: 256Mi
+    traceAgent:
+      resources:
+        requests:
+          cpu: 100m
+          memory: 200Mi
+    processAgent:
+      resources:
+        requests:
+          cpu: 100m
+          memory: 200Mi
+    otelAgent:
+      resources:
+        requests:
+          cpu: 256m
+          memory: 512Mi
+
+clusterAgent:
+  enabled: true
+  replicas: 1
+
+providers:
+  gke:
+    autopilot: false

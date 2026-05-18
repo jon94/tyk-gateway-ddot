@@ -1,0 +1,48 @@
+receivers:
+  prometheus:
+    config:
+      scrape_configs:
+        - job_name: "otelcol"
+          scrape_interval: 10s
+          static_configs:
+            - targets: ["0.0.0.0:8888"]
+  otlp:
+    protocols:
+      grpc:
+         endpoint: 0.0.0.0:4317
+      http:
+         endpoint: 0.0.0.0:4318
+exporters:
+  debug:
+    verbosity: detailed
+  datadog:
+    api:
+      key: ${env:DD_API_KEY}
+      site: ${env:DD_SITE}
+processors:
+  infraattributes:
+    cardinality: 2
+  batch:
+    timeout: 10s
+  transform:
+    trace_statements:
+      - context: span
+        statements:
+          - set(attributes["http.route"], attributes["http.target"]) where attributes["http.target"] != nil
+connectors:
+  datadog/connector:
+    traces:
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [transform, infraattributes, batch]
+      exporters: [datadog, datadog/connector]
+    metrics:
+      receivers: [otlp, datadog/connector, prometheus]
+      processors: [infraattributes, batch]
+      exporters: [datadog]
+    logs:
+      receivers: [otlp]
+      processors: [infraattributes, batch]
+      exporters: [datadog]                  
