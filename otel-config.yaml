@@ -30,6 +30,20 @@ processors:
     timeout: 5s
     override: false
 
+  # Overwrite host.name with k8s.node.name (set by k8sattributes).
+  # Without this, Tyk sets host.name to the pod name (kernel hostname),
+  # creating fake hosts in Datadog and breaking host tag correlation.
+  resource:
+    attributes:
+      - key: host.name
+        from_attribute: k8s.node.name
+        action: upsert
+      # Ensure container name is always present for infraattributes lookup.
+      # Uses insert (not upsert) so k8sattributes value takes precedence.
+      - key: k8s.container.name
+        value: gateway-tyk-gateway
+        action: insert
+
   # Maps OTel resource attributes to Datadog infrastructure tags
   # Enables host-level correlation in Datadog (host map, infra list)
   infraattributes:
@@ -51,7 +65,7 @@ service:
   pipelines:
     traces:
       receivers: [otlp]
-      processors: [k8sattributes, resourcedetection, infraattributes, batch]
+      processors: [k8sattributes, resourcedetection, resource, infraattributes, batch]
       exporters: [datadog]
 
 # Metrics and logs pipelines intentionally omitted — traces only.
