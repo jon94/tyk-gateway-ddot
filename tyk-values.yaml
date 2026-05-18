@@ -16,7 +16,15 @@ tyk-gateway:
       samplingType: AlwaysOn
       contextPropagation: tracecontext
 
-    extraEnvs: []
+    extraEnvs:
+      # Inject pod UID and container name so infraattributes processor
+      # can correlate spans to Kubernetes infrastructure tags in Datadog
+      - name: OTEL_K8S_POD_UID
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.uid
+      - name: OTEL_RESOURCE_ATTRIBUTES
+        value: "k8s.pod.uid=$(OTEL_K8S_POD_UID),k8s.container.name=gateway-tyk-gateway"
 
     service:
       type: LoadBalancer
