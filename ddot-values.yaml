@@ -1,7 +1,7 @@
 datadog:
   apiKey: <YOUR_DATADOG_API_KEY>
   site: datadoghq.com
-  clusterName: tyk-otel-demo
+  clusterName: <CLUSTER_NAME>
   tags:
     - "env:demo"
   apm:
@@ -14,6 +14,16 @@ datadog:
     processCollection: true
   podLabelsAsTags:
     app: app
+
+  # TKG: Kubelet certificates are self-signed — disable TLS verification.
+  kubelet:
+    tlsVerify: false
+
+  # TKG: Disable the bundled kube-state-metrics chart (not compatible with TKG)
+  # and use the built-in kubernetes_state_core check instead.
+  kubeStateMetricsEnabled: false
+  kubeStateMetricsCore:
+    enabled: true
 
   otelCollector:
     enabled: true
@@ -44,6 +54,13 @@ datadog:
           verbs: ["get", "list", "watch"]
 
 agents:
+  # TKG: Toleration required to schedule the Node Agent on master/control-plane nodes.
+  tolerations:
+    - key: node-role.kubernetes.io/master
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/control-plane
+      effect: NoSchedule
+
   containers:
     agent:
       resources:
@@ -72,4 +89,4 @@ clusterAgent:
 
 providers:
   gke:
-    autopilot: false
+    autopilot: false  # Remove this block entirely if deploying on TKG (not GKE)

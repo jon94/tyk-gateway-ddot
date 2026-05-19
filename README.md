@@ -453,6 +453,60 @@ View traces: **Datadog → APM → Traces → filter `service:tyk`**
 
 ---
 
+## Deploying on Tanzu Kubernetes Grid (TKG)
+
+TKG requires three additional changes to `ddot-values.yaml` compared to a standard Kubernetes deployment. These are already included in the file — this section explains why.
+
+### 1. Disable Kubelet TLS verification
+
+```yaml
+datadog:
+  kubelet:
+    tlsVerify: false
+```
+
+TKG generates self-signed certificates for the Kubelet API. The Datadog Agent queries the Kubelet to collect node and pod metrics. With the default `tlsVerify: true`, the Agent rejects the self-signed cert and cannot collect any Kubelet metrics. Setting this to `false` allows the Agent to connect without certificate validation.
+
+### 2. Replace kube-state-metrics with the built-in core check
+
+```yaml
+datadog:
+  kubeStateMetricsEnabled: false
+  kubeStateMetricsCore:
+    enabled: true
+```
+
+The `datadog/datadog` Helm chart can deploy its own kube-state-metrics (KSM) pod as a sub-chart dependency. On TKG, this KSM deployment is not compatible. Disabling it (`kubeStateMetricsEnabled: false`) prevents the sub-chart from deploying. `kubeStateMetricsCore: enabled: true` activates the built-in `kubernetes_state_core` check inside the Cluster Agent instead — this collects the same Kubernetes state metrics without a separate KSM pod.
+
+### 3. Toleration for master/control-plane nodes
+
+```yaml
+agents:
+  tolerations:
+    - key: node-role.kubernetes.io/master
+      effect: NoSchedule
+    - key: node-role.kubernetes.io/control-plane
+      effect: NoSchedule
+```
+
+TKG control-plane nodes carry a `NoSchedule` taint. Without a matching toleration, the Datadog Agent DaemonSet will not schedule on those nodes, meaning no metrics or traces from workloads running there. Both `master` and `control-plane` keys are included for compatibility across TKG versions.
+
+### 4. Remove the GKE provider block
+
+```yaml
+providers:
+  gke:
+    autopilot: false   # Remove this entire block for TKG
+```
+
+The `providers.gke` block applies GKE-specific configuration. Remove it entirely when deploying on TKG.
+
+### Reference
+
+[Datadog Kubernetes distributions guide — TKG](https://docs.datadoghq.com/containers/kubernetes/distributions/?tab=helm#TKG)
+
+---
+
 ## Troubleshooting
 
 | Symptom | Cause | Fix |
