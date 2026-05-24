@@ -3,6 +3,8 @@ global:
     addrs:
       - redis-master.tyk.svc.cluster.local:6379
     pass: ""
+  components:
+    pump: true
 
 tyk-gateway:
   gateway:
@@ -32,3 +34,43 @@ tyk-gateway:
       type: LoadBalancer
       port: 8080
       targetPort: 8080
+
+# ─── Tyk Pump — Datadog DogStatsD integration ───────────────────────────────
+# Sends request-time metrics (tyk.request_time.*) to the Datadog Agent via
+# DogStatsD. Requires the Datadog Agent's DogStatsD port to be accessible
+# (DD_DOGSTATSD_NON_LOCAL_TRAFFIC: true in the Datadog Helm values).
+#
+# Metrics emitted:
+#   tyk.request_time.avg          Average upstream latency (ms)
+#   tyk.request_time.95percentile P95 upstream latency (ms)
+#   tyk.request_time.max          Max upstream latency (ms)
+#   tyk.request_time.median       Median upstream latency (ms)
+#   tyk.request_time.count        Request rate
+#
+# All metrics are tagged with: method, response_code, api_version, api_name,
+# api_id, org_id, tracked, path, oauth_id
+tyk-pump:
+  pump:
+    backend:
+      - "dogstatsd"
+    extraEnvs:
+      # Downward API — node IP for reference (address uses ClusterIP service instead)
+      - name: DD_AGENT_HOST
+        valueFrom:
+          fieldRef:
+            fieldPath: status.hostIP
+      # DogStatsD pump configuration via environment variables
+      - name: TYK_PMP_PUMPS_DOGSTATSD_TYPE
+        value: "dogstatsd"
+      - name: TYK_PMP_PUMPS_DOGSTATSD_META_ADDRESS
+        value: "datadog-agent.datadog.svc.cluster.local:8125"
+      - name: TYK_PMP_PUMPS_DOGSTATSD_META_NAMESPACE
+        value: "tyk"
+      - name: TYK_PMP_PUMPS_DOGSTATSD_META_SAMPLERATE
+        value: "0.9999999999"
+      - name: TYK_PMP_PUMPS_DOGSTATSD_META_BUFFERED
+        value: "true"
+      - name: TYK_PMP_PUMPS_DOGSTATSD_META_BUFFEREDMAXMESSAGES
+        value: "32"
+      - name: TYK_PMP_PUMPS_DOGSTATSD_META_TAGS
+        value: "method,response_code,api_version,api_name,api_id,org_id,tracked,path,oauth_id"
