@@ -54,12 +54,6 @@ tyk-pump:
     backend:
       - "dogstatsd"
     extraEnvs:
-      # Downward API — node IP for reference (address uses ClusterIP service instead)
-      - name: DD_AGENT_HOST
-        valueFrom:
-          fieldRef:
-            fieldPath: status.hostIP
-      # DogStatsD pump configuration via environment variables
       - name: TYK_PMP_PUMPS_DOGSTATSD_TYPE
         value: "dogstatsd"
       - name: TYK_PMP_PUMPS_DOGSTATSD_META_ADDRESS
