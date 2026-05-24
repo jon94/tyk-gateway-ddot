@@ -1,33 +1,52 @@
 # Tyk Gateway + Datadog DDOT Collector on GKE
 
-End-to-end OTel tracing from Tyk Gateway OSS through the Datadog Distribution of OpenTelemetry (DDOT) Collector into Datadog APM, running on GKE Standard.
+End-to-end OTel tracing and DogStatsD metrics from Tyk Gateway OSS through Datadog, running on GKE Standard.
+
+- **Traces** — Tyk Gateway → DDOT Collector (OTel pipeline) → Datadog APM
+- **Metrics** — Tyk Pump → DogStatsD → Datadog Metrics (`tyk.request_time.*`)
 
 ---
 
 ## How it works
 
 ```
-Tyk Gateway Pod (tyk namespace)
-        │
-        │  OTLP gRPC to datadog-otel:4317
-        │  (internalTrafficPolicy: Local ensures same-node routing)
-        ▼
-DDOT Collector — otel-agent container
-(inside Datadog Agent DaemonSet, same node as Tyk)
-        │
-        │  otel-config.yaml pipeline:
-        │  otlp receiver
-        │    → k8sattributes   (adds k8s.pod.name, k8s.node.name, etc.)
-        │    → resourcedetection (adds GCP/host metadata)
-        │    → resource        (fixes host.name, ensures container name)
-        │    → infraattributes (maps attributes to Datadog infra tags)
-        │    → batch           (buffers before export)
-        │    → datadog exporter
-        ▼
-Datadog APM
-  service: tyk
-  host tags: from the GKE node
-  container tags: from the Tyk pod
+┌─────────────────────────────────────────────────────────────────┐
+│  tyk namespace                                                  │
+│                                                                 │
+│  Tyk Gateway Pod                    Tyk Pump Pod                │
+│  ┌────────────────┐                 ┌────────────────┐          │
+│  │ tyk-gateway    │                 │ tyk-pump       │          │
+│  │                │─OTLP gRPC──────▶│                │          │
+│  │                │  :4317          │                │          │
+│  └────────────────┘                 └───────┬────────┘          │
+│           │                                 │                   │
+│           │ OTLP gRPC                       │ DogStatsD UDP     │
+│           │ datadog-otel:4317               │ datadog-agent:8125│
+│           │ (internalTrafficPolicy: Local)  │                   │
+└───────────┼─────────────────────────────────┼───────────────────┘
+            │                                 │
+            ▼                                 ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  datadog namespace — Datadog Agent DaemonSet (same node)        │
+│                                                                 │
+│  ┌──────────────────────────────┐  ┌──────────────────────┐    │
+│  │ DDOT Collector (otel-agent)  │  │ Datadog Agent        │    │
+│  │                              │  │ (DogStatsD :8125/UDP)│    │
+│  │ otlp receiver                │  │                      │    │
+│  │  → k8sattributes             │  │                      │    │
+│  │  → resourcedetection         │  └──────────┬───────────┘    │
+│  │  → resource                  │             │                 │
+│  │  → infraattributes           │             │ Custom Metrics  │
+│  │  → batch                     │             │                 │
+│  │  → datadog exporter          │             │                 │
+│  └──────────────┬───────────────┘             │                 │
+└─────────────────┼───────────────────────────── ┼───────────────┘
+                  │ Traces                        │ Metrics
+                  ▼                               ▼
+           Datadog APM                    Datadog Metrics
+          service: tyk                  tyk.request_time.*
+       host/container tags            tagged by api_name, method,
+      (via infraattributes)           response_code, path, etc.
 ```
 
 ### Why same-node routing matters
@@ -42,9 +61,9 @@ This is solved by setting `internalTrafficPolicy: Local` on the `datadog-otel` K
 
 ```
 .
-├── otel-config.yaml   # DDOT Collector pipeline — what to receive, process, and export
+├── otel-config.yaml   # DDOT Collector pipeline — receive, process, export traces
 ├── ddot-values.yaml   # Datadog Agent Helm values — enables DDOT, sets RBAC, resources
-├── tyk-values.yaml    # Tyk Gateway Helm values — enables OTel, sets resource attributes
+├── tyk-values.yaml    # Tyk Gateway + Tyk Pump Helm values — OTel tracing + DogStatsD metrics
 └── README.md
 ```
 
@@ -238,7 +257,9 @@ Tells the DDOT container to load its pipeline configuration from the `ddot-otel-
 
 ### `tyk-values.yaml`
 
-Helm values for the `tyk-helm/tyk-oss` chart.
+Helm values for the `tyk-helm/tyk-oss` chart. Deploys both Tyk Gateway (traces via OTel) and Tyk Pump (metrics via DogStatsD).
+
+#### Gateway — OTel tracing
 
 ```yaml
     opentelemetry:
@@ -278,6 +299,53 @@ Injects Kubernetes identity into spans as OTel resource attributes via the downw
 - `k8s.pod.uid` — required by the `infraattributes` processor (detection method 3: `k8s.pod.uid` + `k8s.container.name`).
 - `k8s.pod.ip` — gives `k8sattributes` a reliable way to look up the pod beyond the connection source IP.
 - `k8s.container.name` — hardcoded to `gateway-tyk-gateway` (the Tyk container name in the pod spec). Required alongside `k8s.pod.uid` for `infraattributes`.
+
+---
+
+#### Pump — DogStatsD metrics
+
+```yaml
+global:
+  components:
+    pump: true
+```
+Enables the `tyk-pump` sub-chart. Without this flag the pump container is not deployed even if `tyk-pump` values are present.
+
+---
+
+```yaml
+tyk-pump:
+  pump:
+    backend:
+      - "dogstatsd"
+    extraEnvs:
+      - name: TYK_PMP_PUMPS_DOGSTATSD_META_ADDRESS
+        value: "datadog-agent.datadog.svc.cluster.local:8125"
+      ...
+```
+Configures Tyk Pump to push metrics to Datadog via DogStatsD. The backend and all pump settings are injected as environment variables — no separate `pump.conf` file is needed.
+
+`TYK_PMP_PUMPS_<PUMP_NAME>_<FIELD>` is Tyk Pump's env var convention for overriding any config key. This is the correct approach for Kubernetes: secrets stay in env vars, no config file to mount or manage.
+
+- `META_ADDRESS` — `datadog-agent.datadog.svc.cluster.local:8125` routes to the Datadog Agent ClusterIP Service, which forwards to the DaemonSet pod. The Datadog Agent must have `DD_DOGSTATSD_NON_LOCAL_TRAFFIC: true` (set in `ddot-values.yaml`).
+- `META_NAMESPACE` — prefixes all metrics with `tyk.` → `tyk.request_time.*`
+- `META_SAMPLERATE` — `0.9999999999` effectively samples 100% of requests.
+- `META_BUFFERED` + `META_BUFFEREDMAXMESSAGES` — batches up to 32 metrics per UDP packet to reduce socket overhead.
+- `META_TAGS` — the dimensions to tag each metric with: `method`, `response_code`, `api_name`, `api_id`, `path`, `org_id`, etc.
+
+**Note on `pump.conf` vs env vars**: The [Datadog integration docs](https://docs.datadoghq.com/integrations/tyk/) show a `pump.conf` JSON snippet with `address: "dd-agent:8125"`. That is the legacy bare-metal configuration format. For Kubernetes deployments, the `TYK_PMP_PUMPS_*` env var approach is preferred — it works natively with Helm `extraEnvs`, uses proper Kubernetes DNS (`datadog-agent.datadog.svc.cluster.local`), and requires no ConfigMap or volume mount.
+
+#### Metrics emitted
+
+All metrics are in milliseconds and tagged with the dimensions configured in `META_TAGS`.
+
+| Metric | Type | Description |
+|---|---|---|
+| `tyk.request_time.avg` | gauge | Average upstream response time |
+| `tyk.request_time.95percentile` | gauge | P95 upstream response time |
+| `tyk.request_time.max` | gauge | Max upstream response time |
+| `tyk.request_time.median` | gauge | Median upstream response time |
+| `tyk.request_time.count` | rate | Request rate |
 
 ---
 
@@ -385,7 +453,7 @@ spec:
 EOF
 ```
 
-### 6. Deploy Redis and Tyk Gateway
+### 6. Deploy Redis, Tyk Gateway, and Tyk Pump
 
 ```bash
 helm install redis bitnami/redis \
@@ -398,19 +466,26 @@ helm install tyk-gateway tyk-helm/tyk-oss \
   --values tyk-values.yaml
 ```
 
+`tyk-values.yaml` sets `global.components.pump: true`, so this single command deploys both the Gateway (traces) and Pump (metrics) pods.
+
 ### 7. Create a test API and send traffic
 
 ```bash
 kubectl port-forward -n tyk svc/gateway-svc-tyk-gateway 8080:8080
 
-curl -X POST http://localhost:8080/tyk/apis \
-  -H "x-tyk-authorization: CHANGEME" \
+# Get the API secret
+export TYK_SECRET=$(kubectl get secrets -n tyk secrets-tyk-gateway \
+  -o jsonpath="{.data.APISecret}" | base64 --decode)
+
+# Create a keyless API
+curl -X POST http://localhost:8080/tyk/apis/ \
+  -H "x-tyk-authorization: $TYK_SECRET" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "httpbin-test",
     "api_id": "httpbin-test",
-    "org_id": "default",
     "use_keyless": true,
+    "active": true,
     "version_data": {
       "not_versioned": true,
       "versions": { "Default": { "name": "Default", "use_extended_paths": true } }
@@ -419,25 +494,24 @@ curl -X POST http://localhost:8080/tyk/apis \
       "listen_path": "/httpbin/",
       "target_url": "https://httpbin.org/",
       "strip_listen_path": true
-    },
-    "active": true
+    }
   }'
 
-curl http://localhost:8080/tyk/reload -H "x-tyk-authorization: CHANGEME"
+curl -H "x-tyk-authorization: $TYK_SECRET" http://localhost:8080/tyk/reload/group
 
-for i in $(seq 1 20); do curl -s -o /dev/null http://localhost:8080/httpbin/get; done
+# Send traffic
+for i in $(seq 1 50); do curl -s -o /dev/null http://localhost:8080/httpbin/get; done
 ```
 
-### 8. Verify spans are flowing
+### 8. Verify spans and metrics are flowing
 
+**Traces** — check the DDOT span counters:
 ```bash
-# Find the DDOT pod on the same node as Tyk
 TYKNODE=$(kubectl get pod -n tyk -l app=gateway-tyk-gateway \
   -o jsonpath='{.items[0].spec.nodeName}')
 DDPOD=$(kubectl get pods -n datadog -l app=datadog-agent \
   -o wide --no-headers | grep "$TYKNODE" | awk '{print $1}')
 
-# Check span counters
 kubectl port-forward -n datadog pod/$DDPOD 8888:8888 &
 curl -s http://localhost:8888/metrics | grep -E "accepted_spans|sent_spans" | grep -v "^#"
 ```
@@ -449,7 +523,21 @@ otelcol_receiver_accepted_spans{receiver="otlp",...}        <N>
 otelcol_receiver_refused_spans{receiver="otlp",...}         0
 ```
 
-View traces: **Datadog → APM → Traces → filter `service:tyk`**
+**Metrics** — check Tyk Pump logs:
+```bash
+kubectl logs -n tyk -l app=pump-tyk-gateway --tail=20
+```
+
+Expected on startup:
+```
+level=info msg="DogStatsd Pump Initialized" prefix=dogstatsd
+level=info msg="Init Pump: DOGSTATSD"        prefix=main
+level=info msg="Starting purge loop @2 ..."  prefix=main
+```
+
+View in Datadog:
+- **APM → Traces** → filter `service:tyk`
+- **Metrics Explorer** → search `tyk.request_time`
 
 ---
 
@@ -518,3 +606,6 @@ The `providers.gke` block applies GKE-specific configuration. Remove it entirely
 | `TYK_GW_OPENTELEMETRY_ENDPOINT` shows `$(HOST_IP)` literally | Kubernetes env var substitution requires `HOST_IP` to be defined before the referencing var; Tyk chart generates the env var before `extraEnvs` are evaluated | Use ClusterIP DNS name instead — do not rely on `$(HOST_IP)` substitution |
 | Tyk initialized but no spans exported | gRPC connection timed out (default timeout is 1 second) | `connectionTimeout: 10` is set in `tyk-values.yaml` |
 | API returns 404 after pod restart | Tyk OSS stores API definitions ephemerally in the pod filesystem | Re-POST to `/tyk/apis` and call `/tyk/reload` after every restart |
+| `tyk.request_time.*` not appearing in Datadog | Tyk Pump not deployed | Ensure `global.components.pump: true` is set in `tyk-values.yaml` |
+| Pump pod running but no metrics after traffic | DogStatsD port unreachable | Verify `DD_DOGSTATSD_NON_LOCAL_TRAFFIC: true` on the Datadog Agent; check `datadog-agent` Service exposes port 8125/UDP |
+| Pump logs show `address: dd-agent:8125` not resolving | Using bare-metal `pump.conf` format instead of env vars | Use `TYK_PMP_PUMPS_DOGSTATSD_META_ADDRESS` env var with full K8s DNS name `datadog-agent.datadog.svc.cluster.local:8125` |
