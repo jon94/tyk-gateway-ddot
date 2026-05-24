@@ -59,26 +59,12 @@ tyk-gateway:
 # api_id, org_id, tracked, path, oauth_id
 tyk-pump:
   pump:
-    # ── Private registry override (per-component) ─────────────────────────
-    # Use this instead of global.imageRegistry if you only need to override
-    # the pump image (e.g. the gateway is already pulled separately).
-    # Mirror required: docker.tyk.io/tyk-pump/tyk-pump:v1.14.0
-    # image:
-    #   repository: "<YOUR_HARBOR_REGISTRY>/tyk-pump/tyk-pump"
-    #   tag: v1.14.0
-    #   pullPolicy: IfNotPresent
-
-    # ── Image pull secret ─────────────────────────────────────────────────
-    # Required if your private registry needs authentication.
-    # Create the secret first:
-    #   kubectl create secret docker-registry regcred \
-    #     --docker-server=<YOUR_HARBOR_REGISTRY> \
-    #     --docker-username=<USER> \
-    #     --docker-password=<PASSWORD> \
-    #     -n tyk
-    # imagePullSecrets:
-    #   - name: regcred
-
+    image:
+      repository: "cctzharbor02.hksmartone.com/tyk-pump/tyk-pump"
+      tag: v1.14.0
+      pullPolicy: IfNotPresent
+    imagePullSecrets:
+      - name: regcred
     backend:
       - "dogstatsd"
     extraEnvs:
